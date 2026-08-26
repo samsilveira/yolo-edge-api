@@ -1,0 +1,14 @@
+models/*.onnx
+
+output/
+
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+
+# Imagens de teste grandes
+images/
+
+# Variáveis de ambiente locais
+.env
