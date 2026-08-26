@@ -1,6 +1,7 @@
 services:
 
   yolo-api:
+    image: ghcr.io/samsilveira/yolo-edge-api/yolo-api:latest
     build:
       context: .
       dockerfile: Dockerfile.api
