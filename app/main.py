@@ -1,6 +1,10 @@
 import base64
 import io
+
+# Adicionar após os imports existentes em app/main.py
+import json
 import time
+import uuid
 
 import httpx
 import numpy as np
@@ -17,10 +21,6 @@ from schemas import (
     PredictResponse,
 )
 
-# Adicionar após os imports existentes em app/main.py
-
-import json
-import uuid
 
 def log_event(event: str, level: str = "INFO", **kwargs):
     """Emite um evento estruturado em JSON para stdout."""
