@@ -42,7 +42,7 @@ services:
   yolo-stream:
     build:
       context: .
-      dockerfile: Dockerfile.api    # reutiliza a mesma base ARM64
+      dockerfile: Dockerfile.stream  # inclui rpicam-vid e o encoder MJPEG
     container_name: yolo-stream
     ports:
       - "5000:5000"
@@ -54,6 +54,7 @@ services:
       - /run/udev:/run/udev:ro      # permite ao libcamera identificar o sensor via udev
     environment:
       - MODEL_NAME=yolov8n.pt
+      - PYTHONUNBUFFERED=1
     command: >
       python3 stream/mjpeg_server.py
       --device 0

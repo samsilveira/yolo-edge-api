@@ -7,7 +7,9 @@ Execução: python3 stream/v3_optimized.py --device 0 --infer-every 3
 """
 import argparse
 import json
+import os
 import queue
+import shutil
 import threading
 import time
 from pathlib import Path
@@ -37,8 +39,9 @@ class OptimizedCamera:
     """
     def __init__(self, device: int, width: int, height: int,
                  fps: int = 30, use_mjpeg: bool = True):
+        camera_command = os.environ.get("RPICAM_VID_BIN", "rpicam-vid")
         self._cmd = [
-            "rpicam-vid", "-t", "0", "-n", "--codec", "mjpeg",
+            camera_command, "-t", "0", "-n", "--codec", "mjpeg",
             "--camera", str(device),
             "--width", str(width), "--height", str(height),
             "--framerate", str(fps),
@@ -56,7 +59,22 @@ class OptimizedCamera:
         self.frames_out = 0
 
     def start(self):
-        self._proc = subprocess.Popen(self._cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        executable = shutil.which(self._cmd[0])
+        if executable is None:
+            raise RuntimeError(
+                f"Executável '{self._cmd[0]}' não encontrado no PATH. "
+                "Use a imagem criada por Dockerfile.stream, que instala "
+                "rpicam-apps-core e rpicam-apps-encoder."
+            )
+
+        self._cmd[0] = executable
+        self._proc = subprocess.Popen(
+            self._cmd,
+            stdout=subprocess.PIPE,
+            # Mantém os diagnósticos do rpicam-vid visíveis nos logs Docker.
+            stderr=None,
+            bufsize=0,
+        )
         self._thread.start()
         return self
 
