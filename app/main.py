@@ -21,17 +21,21 @@ from schemas import (
     PredictResponse,
 )
 
+from preprocessing.preprocessor import CONFIG_DEFAULT, Preprocessor
+
 
 def log_event(event: str, level: str = "INFO", **kwargs):
     """Emite um evento estruturado em JSON para stdout."""
     import time
+
     record = {
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "level":     level,
-        "event":     event,
+        "level": level,
+        "event": event,
         **kwargs,
     }
     print(json.dumps(record, ensure_ascii=False), flush=True)
+
 
 app = FastAPI(
     title="YOLO Inference API",
@@ -41,6 +45,8 @@ app = FastAPI(
 
 # ── Métricas simples em memória ─────────────────────────────
 _metrics = {"total": 0, "success": 0, "total_ms": 0.0}
+_preprocessor = Preprocessor(CONFIG_DEFAULT)
+
 
 def _decode_image(image_base64: str) -> np.ndarray:
     """Converte base64 → numpy array RGB."""
@@ -48,14 +54,14 @@ def _decode_image(image_base64: str) -> np.ndarray:
     img = Image.open(io.BytesIO(raw)).convert("RGB")
     return np.array(img)
 
+
 def _load_image_from_request(request: PredictRequest) -> np.ndarray:
     """Lê a imagem a partir de Base64 ou URL pública sempre em RGB."""
     if not request.image_base64 and not request.image_url:
         raise HTTPException(
-            status_code=422,
-            detail="Forneça image_base64 ou image_url."
+            status_code=422, detail="Forneça image_base64 ou image_url."
         )
-    
+
     if request.image_base64:
         return _decode_image(request.image_base64)
     else:
@@ -64,24 +70,41 @@ def _load_image_from_request(request: PredictRequest) -> np.ndarray:
         img = Image.open(io.BytesIO(resp.content)).convert("RGB")
         return np.array(img)
 
-def _run_inference(image_np: np.ndarray, model_name: str, confidence: float) -> PredictResponse:
+
+def _run_inference(
+    image_np: np.ndarray, model_name: str, confidence: float
+) -> PredictResponse:
     model = load_model(model_name)
+
+    # Pré-processamento explícito
+    # image_np chega em RGB (já convertido em _decode_image) --
+    # o Preprocessor espera BGR, então converte temporariamente
+    frame_bgr = image_np[:, :, ::-1]
+    preproc_res = _preprocessor.process(frame_bgr)
+    frame_ready = preproc_res.frame  # RGB, letterboxed
+
     t0 = time.perf_counter()
-    results = model(image_np, conf=confidence, verbose=False)
+    results = model(frame_ready, conf=confidence, verbose=False)
     elapsed_ms = (time.perf_counter() - t0) * 1000
 
     detections = []
     for r in results:
         for box in r.boxes:
-            coords = box.xyxy[0].tolist()
+            # Ajusta as coordenadas do espaço letterboxed de volta ao
+            # espaço da imagem original -- sem isso, os bboxes retornados
+            # pela API ficam deslocados sempre que houver padding
+            bbox_lb = box.xyxy[0].numpy().reshape(1, 4)
+            bbox_orig = _preprocessor.adjust_boxes(bbox_lb, preproc_res)[0]
             cls_id = int(box.cls[0].item())
             conf_val = float(box.conf[0].item())
-            
-            detections.append(Detection(
-                label=model.names[cls_id],
-                confidence=round(conf_val, 4),
-                bbox=[round(float(c), 2) for c in coords],
-            ))
+
+            detections.append(
+                Detection(
+                    label=model.names[cls_id],
+                    confidence=round(conf_val, 4),
+                    bbox=[round(float(c), 2) for c in bbox_orig],
+                )
+            )
 
     h, w = image_np.shape[:2]
     return PredictResponse(
@@ -92,7 +115,9 @@ def _run_inference(image_np: np.ndarray, model_name: str, confidence: float) -> 
         image_height=h,
     )
 
+
 # ── Endpoints ───────────────────────────────────────────────
+
 
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
@@ -104,23 +129,31 @@ async def health_check():
         loaded = False
     return HealthResponse(status="ok", model_loaded=loaded, model_name=model_name)
 
+
 @app.post("/predict", response_model=PredictResponse)
 def predict(request: PredictRequest):
     request_id = str(uuid.uuid4())[:8]
     _metrics["total"] += 1
-    log_event("predict_start",
-               request_id=request_id,
-               model=request.model_name,
-               confidente=request.confidence)
+    log_event(
+        "predict_start",
+        request_id=request_id,
+        model=request.model_name,
+        confidente=request.confidence,
+    )
 
     if not request.image_base64 and not request.image_url:
-        log_event("predit_error", level="WARN", request_id=request_id, reason="missing_input")
-        raise HTTPException(status_code=422, detail="Forneça image_base64 ou image_url.")
+        log_event(
+            "predit_error", level="WARN", request_id=request_id, reason="missing_input"
+        )
+        raise HTTPException(
+            status_code=422, detail="Forneça image_base64 ou image_url."
+        )
     try:
         if request.image_base64:
             img = _decode_image(request.image_base64)
         else:
             import httpx
+
             resp = httpx.get(request.image_url, timeout=10)
             resp.raise_for_status()
             img = _decode_image(base64.b64encode(resp.content).decode())
@@ -129,22 +162,23 @@ def predict(request: PredictRequest):
         _metrics["success"] += 1
         _metrics["total_ms"] += result.inference_ms
 
-        log_event("predict_complete",
-                  request_id=request_id,
-                  model=result.model_used,
-                  detections=len(result.detections),
-                  inference_ms=result.inference_ms,
-                  image_size=f"{result.image_width}x{result.image_height}")
+        log_event(
+            "predict_complete",
+            request_id=request_id,
+            model=result.model_used,
+            detections=len(result.detections),
+            inference_ms=result.inference_ms,
+            image_size=f"{result.image_width}x{result.image_height}",
+        )
         return result
 
     except FileNotFoundError as e:
-        log_event("predict_error", level="ERROR",
-                  request_id=request_id, reason=str(e))
+        log_event("predict_error", level="ERROR", request_id=request_id, reason=str(e))
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
-        log_event("predict_error", level="ERROR",
-                  request_id=request_id, reason=str(e))
+        log_event("predict_error", level="ERROR", request_id=request_id, reason=str(e))
         raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.post("/predict/image", responses={200: {"content": {"image/jpeg": {}}}})
 def predict_image(request: PredictRequest):
@@ -154,17 +188,17 @@ def predict_image(request: PredictRequest):
         # 1. Carrega imagem em RGB
         img_rgb = _load_image_from_request(request)
         model = load_model(request.model_name)
-        
+
         t0 = time.perf_counter()
         results = model(img_rgb, conf=request.confidence, verbose=False)
         elapsed_ms = (time.perf_counter() - t0) * 1000
-        
+
         _metrics["success"] += 1
         _metrics["total_ms"] += elapsed_ms
 
         # 2. plot() retorna o array RGB anotado
         annotated_array = results[0].plot()
-        
+
         # 3. Salva diretamente via PIL (RGB nativo da web, sem conversão indevida do OpenCV)
         annotated_pil = Image.fromarray(annotated_array)
         buffer = io.BytesIO()
@@ -179,6 +213,7 @@ def predict_image(request: PredictRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
 @app.post("/predict/batch", response_model=BatchPredictResponse)
 def predict_batch(request: BatchPredictRequest):
     t_total = time.perf_counter()
@@ -189,9 +224,10 @@ def predict_batch(request: BatchPredictRequest):
     total_ms = (time.perf_counter() - t_total) * 1000
     return BatchPredictResponse(results=results, total_inference_ms=round(total_ms, 2))
 
+
 @app.get("/metrics", response_model=MetricsResponse)
 async def get_metrics():
-    avg = (_metrics["total_ms"] / _metrics["success"] if _metrics["success"] > 0 else 0.0)
+    avg = _metrics["total_ms"] / _metrics["success"] if _metrics["success"] > 0 else 0.0
     return MetricsResponse(
         total_requests=_metrics["total"],
         successful_requests=_metrics["success"],
