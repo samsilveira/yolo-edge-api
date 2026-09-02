@@ -29,6 +29,7 @@ RUN pip install --no-cache-dir torch torchvision \
     pip install --no-cache-dir -r requirements.txt
 
 COPY stream/ ./stream/
+COPY preprocessing/ ./preprocessing/
 
 EXPOSE 5000
 
